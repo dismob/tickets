@@ -171,6 +171,25 @@ class Tickets(commands.GroupCog, name="tickets"):
             await db.commit()
         await log.success(interaction, f"Ticket panel '{panel_name}' configured successfully!")
 
+    @app_commands.command(name="delete_panel", description="Delete a ticket panel and all its buttons")
+    @app_commands.guild_only()
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def delete_panel(self,
+        interaction: discord.Interaction,
+        panel_name: str
+    ):
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("SELECT id FROM ticket_panels WHERE guild_id = ? AND panel_name = ?", (interaction.guild_id, panel_name))
+            panel_data = await cursor.fetchone()
+            if not panel_data:
+                await log.failure(interaction, f"Panel '{panel_name}' not found.")
+                return
+
+            await db.execute("DELETE FROM ticket_panels WHERE guild_id = ? AND panel_name = ?", (interaction.guild_id, panel_name))
+            await db.commit()
+        
+        await log.success(interaction, f"Ticket panel '{panel_name}' and all its buttons have been deleted successfully!")
+
     @app_commands.command(name="button", description="Configure a custom ticket button for a panel")
     @app_commands.guild_only()
     @app_commands.checks.has_permissions(manage_guild=True)
