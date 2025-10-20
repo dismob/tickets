@@ -329,7 +329,7 @@ class Tickets(commands.GroupCog, name="tickets"):
     @app_commands.command(name="here", description="Create a ticket panel in the current channel")
     @app_commands.guild_only()
     @app_commands.checks.has_permissions(manage_channels=True)
-    async def ticket_here(self, interaction: discord.Interaction, panel_name: str):
+    async def ticket_here(self, interaction: discord.Interaction, panel_name: str, channel: discord.TextChannel | None = None):
         # Get ticket panel settings
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute(
@@ -355,19 +355,21 @@ class Tickets(commands.GroupCog, name="tickets"):
 
         view = TicketPanelView(self, interaction.guild_id, panel_id)
         await view.load_buttons()
+
+        new_channel = channel if channel is not None else interaction.channel
         
         embed = discord.Embed(
             title=panel_title or self.default_panel_title,
             description=panel_description or self.default_panel_description,
             color=discord.Color.blurple()
         )
-        panel_message = await log.safe_send_message(interaction.channel, embed=embed, view=view)
+        panel_message = await log.safe_send_message(new_channel, embed=embed, view=view)
 
         # Store new panel information
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 "UPDATE ticket_panels SET channel_id = ?, message_id = ? WHERE id = ?",
-                (interaction.channel_id, panel_message.id, panel_id)
+                (new_channel.id, panel_message.id, panel_id)
             )
             await db.commit()
         
