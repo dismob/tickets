@@ -39,14 +39,14 @@ class Tickets(commands.GroupCog, name="tickets"):
         await self.clear_views()
 
     async def setup_views(self):
-        """Setup persistent views for all configured guilds"""
+        """Setup persistent views for all configured panels"""
         self.bot.add_view(TicketView(self))
         async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute("SELECT DISTINCT guild_id FROM ticket_config")
-            guild_ids = await cursor.fetchall()
+            cursor = await db.execute("SELECT guild_id, id FROM ticket_panels")
+            panels = await cursor.fetchall()
             
-            for (guild_id,) in guild_ids:
-                view = TicketPanelView(self, guild_id)
+            for guild_id, panel_id in panels:
+                view = TicketPanelView(self, guild_id, panel_id)
                 await view.load_buttons()
                 self.bot.add_view(view)
 
@@ -67,29 +67,20 @@ class Tickets(commands.GroupCog, name="tickets"):
     async def setup_db(self):
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
-                CREATE TABLE IF NOT EXISTS ticket_config (
-                    guild_id INTEGER PRIMARY KEY,
-                    category_id INTEGER,
-                    log_channel_id INTEGER,
-                    panel_title TEXT,
-                    panel_description TEXT
-                )
-            """)
-
-            await db.execute("""
                 CREATE TABLE IF NOT EXISTS tickets (
                     channel_id INTEGER PRIMARY KEY,
                     guild_id INTEGER,
                     user_id INTEGER,
                     created_at TIMESTAMP,
-                    closed_at TIMESTAMP
+                    closed_at TIMESTAMP,
+                    button_id INTEGER
                 )
             """)
 
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS ticket_buttons (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    guild_id INTEGER,
+                    panel_id INTEGER,
                     button_label TEXT,
                     ticket_title TEXT,
                     ticket_message TEXT,
@@ -97,18 +88,23 @@ class Tickets(commands.GroupCog, name="tickets"):
                     button_emoji TEXT,
                     button_style TEXT CHECK(button_style IN ('primary', 'secondary', 'success', 'danger', 'link', 'premium')),
                     ticket_color TEXT,
-                    FOREIGN KEY(guild_id) REFERENCES ticket_config(guild_id),
-                    UNIQUE(guild_id, button_position)
+                    FOREIGN KEY(panel_id) REFERENCES ticket_panels(id) ON DELETE CASCADE,
+                    UNIQUE(panel_id, button_position)
                 )
             """)
             
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS ticket_panels (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
                     guild_id INTEGER,
+                    panel_name TEXT,
+                    panel_title TEXT,
+                    panel_description TEXT,
                     channel_id INTEGER,
                     message_id INTEGER,
-                    PRIMARY KEY (guild_id, channel_id, message_id),
-                    FOREIGN KEY(guild_id) REFERENCES ticket_config(guild_id)
+                    category_id INTEGER,
+                    log_channel_id INTEGER,
+                    UNIQUE(guild_id, panel_name)
                 )
             """)
             
@@ -123,59 +119,64 @@ class Tickets(commands.GroupCog, name="tickets"):
             """)
             await db.commit()
 
-    @app_commands.command(name="settings", description="Setup the ticket system")
+    @app_commands.command(name="panel", description="Create or update a ticket panel")
     @app_commands.guild_only()
     @app_commands.checks.has_permissions(manage_guild=True)
-    async def setup_tickets(self, 
-        interaction: discord.Interaction, 
-        category: discord.CategoryChannel = None,
-        log_channel: discord.TextChannel = None,
-        panel_title: str = None,
-        panel_description: str = None
+    async def setup_panel(self,
+        interaction: discord.Interaction,
+        panel_name: str,
+        category: discord.CategoryChannel | None = None,
+        log_channel: discord.TextChannel | None = None,
+        panel_title: str | None = None,
+        panel_description: str | None = None
     ):
         async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute("SELECT category_id, log_channel_id, panel_title, panel_description FROM ticket_config WHERE guild_id = ?", (interaction.guild_id,))
-            existing_config = await cursor.fetchone()
-            if existing_config:
-                old_category_id, old_log_channel_id, old_panel_title, old_panel_description = existing_config
-            else:
-                old_category_id = old_log_channel_id = old_panel_title = old_panel_description = None
+            cursor = await db.execute("SELECT panel_title, panel_description, category_id, log_channel_id FROM ticket_panels WHERE guild_id = ? AND panel_name = ?", (interaction.guild_id, panel_name))
+            existing_panel = await cursor.fetchone()
 
-            if not category and not log_channel and not panel_title and not panel_description:
-                if existing_config:
+            if all(arg is None for arg in [category, log_channel, panel_title, panel_description]):
+                if existing_panel:
+                    title, desc, cat_id, log_id = existing_panel
                     await log.client(interaction,
-                        f"{f'Category: {f'<#{old_category_id}>' if old_category_id is not None else 'No category set'}'}\n"
-                        f"{f'Log Channel: {f'<#{old_log_channel_id}>' if old_log_channel_id is not None else 'No log channel set'}'}\n"
-                        f"Panel Title: {old_panel_title if old_panel_title is not None else "Default"}\n"
-                        f"Panel Description: {old_panel_description if old_panel_description is not None else "Default"}",
-                        title="Ticket System Configuration")
+                        f"**Panel Title**: {title or 'Default'}\n"
+                        f"**Panel Description**: {desc or 'Default'}\n"
+                        f"**Category**: {f'<#{cat_id}>' if cat_id else 'Not Set'}\n"
+                        f"**Log Channel**: {f'<#{log_id}>' if log_id else 'Not Set'}",
+                        title=f"Ticket Panel '{panel_name}' Configuration")
                 else:
-                    await log.client(interaction, "No configuration found. Please provide parameters to set up.")
-                
-            new_category = category.id if category is not None else old_category_id
-            new_log_channel = log_channel.id if log_channel is not None else old_log_channel_id
-            new_panel_title = panel_title if panel_title is not None else old_panel_title
-            new_panel_description = panel_description if panel_description is not None else old_panel_description
-            
-            await db.execute("""
-                INSERT INTO ticket_config 
-                (guild_id, category_id, log_channel_id, panel_title, panel_description) 
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(guild_id)
-                DO UPDATE SET 
-                    category_id = excluded.category_id, 
-                    log_channel_id = excluded.log_channel_id, 
-                    panel_title = excluded.panel_title,
-                    panel_description = excluded.panel_description
-            """, (interaction.guild_id, new_category, new_log_channel, new_panel_title, new_panel_description))
-            await db.commit()
-        await log.success(interaction, "Ticket system configured successfully!")
+                    await log.failure(interaction, f"No configuration found for panel '{panel_name}'. Please provide parameters to set it up.")
+                return
 
-    @app_commands.command(name="button", description="Configure a custom ticket button")
+            if existing_panel:
+                new_panel_title = panel_title if panel_title is not None else existing_panel[0]
+                new_panel_description = panel_description if panel_description is not None else existing_panel[1]
+                new_category = category.id if category is not None else existing_panel[2]
+                new_log_channel = log_channel.id if log_channel is not None else existing_panel[3]
+            else:
+                new_panel_title = panel_title
+                new_panel_description = panel_description
+                new_category = category.id if category else None
+                new_log_channel = log_channel.id if log_channel else None
+
+            await db.execute("""
+                INSERT INTO ticket_panels (guild_id, panel_name, panel_title, panel_description, category_id, log_channel_id)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(guild_id, panel_name)
+                DO UPDATE SET
+                    panel_title = excluded.panel_title,
+                    panel_description = excluded.panel_description,
+                    category_id = excluded.category_id,
+                    log_channel_id = excluded.log_channel_id
+            """, (interaction.guild_id, panel_name, new_panel_title, new_panel_description, new_category, new_log_channel))
+            await db.commit()
+        await log.success(interaction, f"Ticket panel '{panel_name}' configured successfully!")
+
+    @app_commands.command(name="button", description="Configure a custom ticket button for a panel")
     @app_commands.guild_only()
     @app_commands.checks.has_permissions(manage_guild=True)
     async def setup_button(self,
         interaction: discord.Interaction,
+        panel_name: str,
         position: app_commands.Range[int, 1, 3],
         button_label: str | None,
         ticket_title: str | None,
@@ -186,31 +187,38 @@ class Tickets(commands.GroupCog, name="tickets"):
         support_roles: str | None  # Comma-separated list of role IDs or mentions
     ):
         async with aiosqlite.connect(self.db_path) as db:
-            # Check if ticket system is configured
-            cursor = await db.execute("SELECT 1 FROM ticket_config WHERE guild_id = ?", (interaction.guild_id,))
-            if not await cursor.fetchone():
-                await log.failure(interaction, "Please configure the ticket system first using /tickets settings")
+            # Check if panel exists
+            cursor = await db.execute("SELECT id FROM ticket_panels WHERE guild_id = ? AND panel_name = ?", (interaction.guild_id, panel_name))
+            panel_data = await cursor.fetchone()
+            if not panel_data:
+                await log.failure(interaction, f"Panel '{panel_name}' not found. Please create it first using `/tickets panel`.")
                 return
+            panel_id = panel_data[0]
 
             # If all parameters are None, display current button configuration
-            if button_label is None and ticket_title is None and ticket_message is None and button_emoji is None and button_style is None:
+            if button_label is None and ticket_title is None and ticket_message is None and button_emoji is None and button_style is None and ticket_color is None and support_roles is None:
                 cursor = await db.execute("""
-                    SELECT button_label, ticket_title, ticket_message, button_emoji, button_style 
-                    FROM ticket_buttons 
-                    WHERE guild_id = ? AND button_position = ?
-                """, (interaction.guild_id, position))
+                    SELECT b.button_label, b.ticket_title, b.ticket_message, b.button_emoji, b.button_style, b.ticket_color, GROUP_CONCAT(r.role_id)
+                    FROM ticket_buttons b
+                    LEFT JOIN ticket_button_roles r ON b.id = r.button_id
+                    WHERE b.panel_id = ? AND b.button_position = ?
+                    GROUP BY b.id
+                """, (panel_id, position))
                 existing_button = await cursor.fetchone()
                 if existing_button:
+                    roles_str = ", ".join([f"<@&{r}>" for r in existing_button[6].split(',')]) if existing_button[6] else "None"
                     await log.client(interaction,
-                        f"**Button {position} Configuration:**\n"
+                        f"**Button {position} Configuration for Panel '{panel_name}':**\n"
                         f"Label: {existing_button[0]}\n"
                         f"Ticket Title: {existing_button[1]}\n"
                         f"Ticket Message: {existing_button[2]}\n"
                         f"Emoji: {existing_button[3]}\n"
-                        f"Style: {existing_button[4]}",
+                        f"Style: {existing_button[4]}\n"
+                        f"Color: {existing_button[5]}\n"
+                        f"Support Roles: {roles_str}",
                         title=f"Ticket Button {position} Configuration")
                 else:
-                    await log.client(interaction, f"No configuration found for button {position}. Please provide parameters to set it up.")
+                    await log.client(interaction, f"No configuration found for button {position} on panel '{panel_name}'.")
                 return
 
             # Convert ButtonStyle enum to string
@@ -219,25 +227,25 @@ class Tickets(commands.GroupCog, name="tickets"):
             # Update the button configuration
             await db.execute("""
                 INSERT INTO ticket_buttons 
-                (guild_id, button_label, ticket_title, ticket_message, button_position, button_emoji, button_style, ticket_color)
+                (panel_id, button_label, ticket_title, ticket_message, button_position, button_emoji, button_style, ticket_color)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(guild_id, button_position)
+                ON CONFLICT(panel_id, button_position)
                 DO UPDATE SET 
-                    button_label = excluded.button_label,
-                    ticket_title = excluded.ticket_title,
-                    ticket_message = excluded.ticket_message,
-                    button_emoji = excluded.button_emoji,
-                    button_style = excluded.button_style,
-                    ticket_color = excluded.ticket_color
-            """, (interaction.guild_id, button_label, ticket_title, ticket_message, position, button_emoji, style_name, ticket_color))
+                    button_label = COALESCE(excluded.button_label, button_label),
+                    ticket_title = COALESCE(excluded.ticket_title, ticket_title),
+                    ticket_message = COALESCE(excluded.ticket_message, ticket_message),
+                    button_emoji = COALESCE(excluded.button_emoji, button_emoji),
+                    button_style = COALESCE(excluded.button_style, button_style),
+                    ticket_color = COALESCE(excluded.ticket_color, ticket_color)
+            """, (panel_id, button_label, ticket_title, ticket_message, position, button_emoji, style_name, ticket_color))
 
             # Update the support roles
-            if support_roles:
+            if support_roles is not None:
                 # Get the button id
                 cursor = await db.execute("""
                     SELECT id FROM ticket_buttons 
-                    WHERE guild_id = ? AND button_position = ?
-                """, (interaction.guild_id, position))
+                    WHERE panel_id = ? AND button_position = ?
+                """, (panel_id, position))
                 button_id = (await cursor.fetchone())[0]
                 
                 # Delete existing roles for this button
@@ -245,16 +253,17 @@ class Tickets(commands.GroupCog, name="tickets"):
                 
                 # Parse role mentions or IDs
                 role_ids = []
-                for role_str in support_roles.split(','):
-                    role_str = role_str.strip()
-                    if role_str.startswith('<@&') and role_str.endswith('>'):
-                        role_id = int(role_str[3:-1])
-                    else:
-                        try:
-                            role_id = int(role_str)
-                        except ValueError:
-                            continue
-                    role_ids.append(role_id)
+                if support_roles: # Allow empty string to clear roles
+                    for role_str in support_roles.split(','):
+                        role_str = role_str.strip()
+                        if role_str.startswith('<@&') and role_str.endswith('>'):
+                            role_id = int(role_str[3:-1])
+                        else:
+                            try:
+                                role_id = int(role_str)
+                            except ValueError:
+                                continue
+                        role_ids.append(role_id)
 
                 # Insert new roles
                 for role_id in role_ids:
@@ -265,75 +274,67 @@ class Tickets(commands.GroupCog, name="tickets"):
 
             await db.commit()
         
-        await log.success(interaction, f"Button {position} configured successfully!")
+        await log.success(interaction, f"Button {position} for panel '{panel_name}' configured successfully!")
 
     # Add a command to delete a button at specific position
-    @app_commands.command(name="delete_button", description="Delete a custom ticket button")
+    @app_commands.command(name="delete_button", description="Delete a custom ticket button from a panel")
     @app_commands.guild_only()
     @app_commands.checks.has_permissions(manage_guild=True)
     async def delete_button(self,
         interaction: discord.Interaction,
+        panel_name: str,
         position: app_commands.Range[int, 1, 3]
     ):
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute("""
-                SELECT 1 FROM ticket_buttons 
-                WHERE guild_id = ? AND button_position = ?
-            """, (interaction.guild_id, position))
+                SELECT b.id FROM ticket_buttons b
+                JOIN ticket_panels p ON b.panel_id = p.id
+                WHERE p.guild_id = ? AND p.panel_name = ? AND b.button_position = ?
+            """, (interaction.guild_id, panel_name, position))
             if not await cursor.fetchone():
-                await log.failure(interaction, f"No button found at position {position} to delete.")
+                await log.failure(interaction, f"No button found at position {position} on panel '{panel_name}' to delete.")
                 return
 
             await db.execute("""
-                DELETE FROM ticket_buttons 
-                WHERE guild_id = ? AND button_position = ?
-            """, (interaction.guild_id, position))
+                DELETE FROM ticket_buttons
+                WHERE id IN (
+                    SELECT b.id FROM ticket_buttons b
+                    JOIN ticket_panels p ON b.panel_id = p.id
+                    WHERE p.guild_id = ? AND p.panel_name = ? AND b.button_position = ?
+                )
+            """, (interaction.guild_id, panel_name, position))
             await db.commit()
         
-        await log.success(interaction, f"Button {position} deleted successfully!")
+        await log.success(interaction, f"Button {position} from panel '{panel_name}' deleted successfully!")
 
-    @app_commands.command(name="here", description="Create the ticket buttons in the current channel")
+    @app_commands.command(name="here", description="Create a ticket panel in the current channel")
     @app_commands.guild_only()
     @app_commands.checks.has_permissions(manage_channels=True)
-    async def ticket_here(self, interaction: discord.Interaction):
+    async def ticket_here(self, interaction: discord.Interaction, panel_name: str):
         # Get ticket panel settings
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute(
-                "SELECT panel_title, panel_description FROM ticket_config WHERE guild_id = ?",
-                (interaction.guild_id,)
+                "SELECT id, panel_title, panel_description, channel_id, message_id FROM ticket_panels WHERE guild_id = ? AND panel_name = ?",
+                (interaction.guild_id, panel_name)
             )
             result = await cursor.fetchone()
             if not result:
-                await log.failure(interaction, "Ticket system not configured! Ask an admin to run /tickets settings")
+                await log.failure(interaction, f"Panel '{panel_name}' not configured! Ask an admin to run `/tickets panel`")
                 return
             
-            panel_title, panel_description = result
+            panel_id, panel_title, panel_description, old_channel_id, old_message_id = result
 
-        # Delete previous panel if exists
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(
-                "SELECT channel_id, message_id FROM ticket_panels WHERE guild_id = ?",
-                (interaction.guild_id,)
-            )
-            panels = await cursor.fetchall()
-            
-            for channel_id, message_id in panels:
-                try:
-                    channel = interaction.guild.get_channel(channel_id)
-                    if channel:
-                        message = await channel.fetch_message(message_id)
-                        await message.delete()
-                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                    pass  # Message already deleted or no permissions
-                
-            # Clear old panels from database
-            await db.execute(
-                "DELETE FROM ticket_panels WHERE guild_id = ?",
-                (interaction.guild_id,)
-            )
-            await db.commit()
+        # Delete previous panel message if exists
+        if old_channel_id and old_message_id:
+            try:
+                channel = interaction.guild.get_channel(old_channel_id)
+                if channel:
+                    message = await channel.fetch_message(old_message_id)
+                    await message.delete()
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass  # Message already deleted or no permissions
 
-        view = TicketPanelView(self, interaction.guild_id)
+        view = TicketPanelView(self, interaction.guild_id, panel_id)
         await view.load_buttons()
         
         embed = discord.Embed(
@@ -346,12 +347,12 @@ class Tickets(commands.GroupCog, name="tickets"):
         # Store new panel information
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
-                "INSERT INTO ticket_panels (guild_id, channel_id, message_id) VALUES (?, ?, ?)",
-                (interaction.guild_id, interaction.channel_id, panel_message.id)
+                "UPDATE ticket_panels SET channel_id = ?, message_id = ? WHERE id = ?",
+                (interaction.channel_id, panel_message.id, panel_id)
             )
             await db.commit()
         
-        await log.success(interaction, "Ticket panel created successfully!")
+        await log.success(interaction, f"Ticket panel '{panel_name}' created successfully!")
 
     # Command to close manually a ticcket
     @app_commands.command(name="close", description="Close a ticket")
@@ -360,17 +361,21 @@ class Tickets(commands.GroupCog, name="tickets"):
     async def close_ticket_command(self, interaction: discord.Interaction):
         await self.close_ticket(interaction)
 
-    async def create_ticket(self, interaction: discord.Interaction, title: str, message: str, color: str, support_roles: list[int] | None = None):
+    async def create_ticket(self, interaction: discord.Interaction, title: str, message: str, color: str, button_id: int, panel_id: int, support_roles: list[int] | None = None):
+        if not panel_id:
+            await log.failure(interaction, "Could not identify the ticket panel. The view may be outdated.")
+            return
+
         async with aiosqlite.connect(self.db_path) as db:
-            # Get category_id from config
+            # Get category_id from the panel
             cursor = await db.execute(
-                "SELECT category_id FROM ticket_config WHERE guild_id = ?", 
-                (interaction.guild_id,)
+                "SELECT category_id FROM ticket_panels WHERE id = ?", 
+                (panel_id,)
             )
             config = await cursor.fetchone()
             
-        if not config:
-            await log.failure(interaction, "Ticket system not configured! Ask an admin to run /ticket settings")
+        if not config or not config[0]:
+            await log.failure(interaction, "Ticket category not configured for this panel! Ask an admin to run `/tickets panel`")
             return
 
         category_id = config[0]
@@ -436,8 +441,8 @@ class Tickets(commands.GroupCog, name="tickets"):
         # Save ticket to database
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
-                "INSERT INTO tickets (channel_id, guild_id, user_id, created_at) VALUES (?, ?, ?, ?)",
-                (channel.id, interaction.guild_id, interaction.user.id, datetime.datetime.now())
+                "INSERT INTO tickets (channel_id, guild_id, user_id, created_at, button_id) VALUES (?, ?, ?, ?, ?)",
+                (channel.id, interaction.guild_id, interaction.user.id, datetime.datetime.now(), button_id)
             )
             await db.commit()
 
@@ -445,17 +450,17 @@ class Tickets(commands.GroupCog, name="tickets"):
 
     async def close_ticket(self, interaction: discord.Interaction):
         async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute("SELECT COUNT(*) FROM tickets WHERE channel_id = ?", (interaction.channel_id,))
-            count_result = await cursor.fetchone()
-            if count_result[0] == 0:
+            cursor = await db.execute("SELECT button_id FROM tickets WHERE channel_id = ?", (interaction.channel_id,))
+            ticket_data = await cursor.fetchone()
+            if not ticket_data:
                 await log.failure(interaction, "This ticket is not registered in the database!")
                 return
 
+            button_id = ticket_data[0]
+
             # Get support roles for this ticket's button
-            support_roles = await self.get_ticket_button_roles(interaction.channel_id)
-            if support_roles is None:
-                await log.failure(interaction, "Could not find ticket configuration!")
-                return
+            cursor = await db.execute("SELECT role_id FROM ticket_button_roles WHERE button_id = ?", (button_id,))
+            support_roles = [row[0] for row in await cursor.fetchall()]
 
             if not interaction.user.guild_permissions.administrator:
                 # Check if user has any of the support roles
@@ -464,11 +469,12 @@ class Tickets(commands.GroupCog, name="tickets"):
                     await log.failure(interaction, "You don't have permission to close this ticket!")
                     return
 
-            # Get log channel
-            cursor = await db.execute(
-                "SELECT log_channel_id FROM ticket_config WHERE guild_id = ?",
-                (interaction.guild_id,)
-            )
+            # Get log channel from the panel associated with the button
+            cursor = await db.execute("""
+                SELECT p.log_channel_id FROM ticket_panels p
+                JOIN ticket_buttons b ON p.id = b.panel_id
+                WHERE b.id = ?
+            """, (button_id,))
             result = await cursor.fetchone()
             log_channel_id = result[0] if result else None
 
@@ -496,7 +502,7 @@ class Tickets(commands.GroupCog, name="tickets"):
                 file_content = BytesIO(content.encode('utf-8'))
                 await log_channel.send(embed=embed, file=discord.File(
                     file_content,
-                    filename=f"{now.strftime("%Y%m%d-%H%M%S")}-{interaction.channel.name}.txt"
+                    filename=f"{now.strftime('%Y%m%d-%H%M%S')}-{interaction.channel.name}.txt"
                 ))
 
         # Archive thread if it exists
@@ -511,22 +517,23 @@ class Tickets(commands.GroupCog, name="tickets"):
         await asyncio.sleep(5)
         await interaction.channel.delete()
 
+    def get_panel_id_from_interaction(self, interaction: discord.Interaction) -> int | None:
+        """Helper to extract panel_id from a button interaction's view."""
+        if isinstance(interaction.view, TicketPanelView):
+            return interaction.view.panel_id
+        return None
+
     async def get_ticket_button_roles(self, channel_id: int) -> list[int] | None:
         """Get the support roles associated with the ticket's button"""
         async with aiosqlite.connect(self.db_path) as db:
-            # First get the ticket info to get button position
-            cursor = await db.execute("""
-                SELECT t.channel_id, tb.id
-                FROM tickets t
-                JOIN ticket_buttons tb ON tb.guild_id = t.guild_id
-                WHERE t.channel_id = ?
-            """, (channel_id,))
+            # First get the ticket info to get button id
+            cursor = await db.execute("SELECT button_id FROM tickets WHERE channel_id = ?", (channel_id,))
             result = await cursor.fetchone()
             
-            if not result:
-                return None
+            if not result or result[0] is None:
+                return [] # Return empty list if no button is associated or ticket not found
                 
-            button_id = result[1]
+            button_id = result[0]
             
             # Get support roles for this button
             cursor = await db.execute("""
@@ -539,10 +546,11 @@ class Tickets(commands.GroupCog, name="tickets"):
 
 # View for a panel containing ticket buttons for members to create new tickets
 class TicketPanelView(discord.ui.View):
-    def __init__(self, cog, guild_id: int):
+    def __init__(self, cog, guild_id: int, panel_id: int):
         super().__init__(timeout=None)
         self.cog: Tickets = cog
         self.guild_id = guild_id
+        self.panel_id = panel_id
         self.buttons_loaded = False
 
     async def load_buttons(self):
@@ -551,17 +559,18 @@ class TicketPanelView(discord.ui.View):
 
         async with aiosqlite.connect(self.cog.db_path) as db:
             cursor = await db.execute(
-                """SELECT button_label, ticket_title, ticket_message, button_position, 
+                """SELECT id, button_label, ticket_title, ticket_message, button_position, 
                    button_emoji, button_style, ticket_color
                    FROM ticket_buttons 
-                   WHERE guild_id = ? 
+                   WHERE panel_id = ? 
                    ORDER BY button_position""",
-                (self.guild_id,)
+                (self.panel_id,)
             )
             buttons = await cursor.fetchall()
 
-            for label, title, message, position, emoji, style, color in buttons:
+            for button_id, label, title, message, position, emoji, style, color in buttons:
                 self.add_item(TicketPanelButton(
+                    button_id=button_id,
                     label=label,
                     position=position,
                     title=title or self.cog.default_ticket_title,
@@ -574,6 +583,7 @@ class TicketPanelView(discord.ui.View):
 
         if not buttons: # If no custom buttons, add default button
             self.add_item(TicketPanelButton(
+                button_id=None, # No ID for default button
                 label=self.cog.default_button_label,
                 position=0,
                 title=self.cog.default_ticket_title,
@@ -588,45 +598,35 @@ class TicketPanelView(discord.ui.View):
 
 # Button inside the ticket panel
 class TicketPanelButton(discord.ui.Button):
-    def __init__(self, label: str, position: int, title: str, message: str, guild_id: int, emoji: str, style: str, ticket_color: str):
-        button_style = getattr(discord.ButtonStyle, style.upper(), discord.ButtonStyle.primary)
+    def __init__(self, button_id: int | None, label: str, position: int, title: str, message: str, guild_id: int, emoji: str, style: str, ticket_color: str):
+        button_style = getattr(discord.ButtonStyle, style.lower(), discord.ButtonStyle.primary)
         super().__init__(
             label=label,
             style=button_style,
             emoji=emoji,
-            custom_id=f"ticket_button_{guild_id}_{position}"
+            custom_id=f"ticket_button_{guild_id}_{position}_{button_id or 'default'}"
         )
+        self.button_id = button_id
         self.ticket_title = title
         self.ticket_message = message
         self.ticket_color = ticket_color
         self.position = position
 
-    async def get_support_roles(self, guild_id: int) -> list[int] | None:
+    async def get_support_roles(self) -> list[int]:
+        if self.button_id is None:
+            return []
         view: TicketPanelView = self.view
         async with aiosqlite.connect(view.cog.db_path) as db:
-            cursor = await db.execute("""
-                SELECT id 
-                FROM ticket_buttons
-                WHERE guild_id = ? AND button_position = ?
-            """, (guild_id, self.position))
-            button_data = await cursor.fetchone()
-            
-            # No configuration found
-            if not button_data:
-                return None
-
-            button_id = button_data[0]
-            
             # Get support roles for this button
             cursor = await db.execute("""
                 SELECT role_id FROM ticket_button_roles WHERE button_id = ?
-            """, (button_id,))
+            """, (self.button_id,))
             return [row[0] for row in await cursor.fetchall()]
 
     async def callback(self, interaction: discord.Interaction):
         view: TicketPanelView = self.view
-        support_roles = await self.get_support_roles(interaction.guild_id)
-        await view.cog.create_ticket(interaction, self.ticket_title, self.ticket_message, self.ticket_color, support_roles)
+        support_roles = await self.get_support_roles()
+        await view.cog.create_ticket(interaction, self.ticket_title, self.ticket_message, self.ticket_color, self.button_id, view.panel_id, support_roles)
 
 # View inside a ticket to manage the ticket itself
 class TicketView(discord.ui.View):
