@@ -26,8 +26,9 @@ Then you can reload your discord client with `Ctrl+R` to see the new slash comma
 
 Command | Description
 --- | ---
-`/tickets settings [<category>] [<log channel>] [<title>] [<description>]` | Create or update the panel settings for your server. The category is where new tickets will be created. The log channel is where the closed ticket archives are placed.
-`/tickets button <position> [<label>] [<emoji>] [<style>] [<ticket title>] [<ticket message>] [<ticket color>] [<roles>]` | Create or update the button of the panel at a position. Roles are the roles that manage the tickets created by this button.
-`/tickets delete_button <position>` | Delete the button config at position.
-`/tickets here` | Spawn the ticket panel in this channel. Previous panel will be deleted.
+`/tickets panel <panel name> [<category>] [<log channel>] [<title>] [<description>]` | Create or update a panel config for your server. The category is where new tickets will be created. The log channel is where the closed ticket archives are placed.
+`/tickets delete_panel <panel_name>` | Delete a panel config and its buttons.
+`/tickets button <panel name> <position> [<label>] [<emoji>] [<style>] [<ticket title>] [<ticket message>] [<ticket color>] [<roles>]` | Create or update the button of a panel at a position. Roles are the roles that manage the tickets created by this button.
+`/tickets delete_button <panel_name> <position>` | Delete the button config of a panel at position.
+`/tickets here <panel name> [<channel>]` | Spawn a ticket panel in this channel (or the specified one if any). Previous panel will be deleted.
 `/tickets close` | Manually close the ticket where the command is used.
