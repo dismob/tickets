@@ -28,7 +28,7 @@ Command | Description
 --- | ---
 `/tickets panel <panel name> [<category>] [<log channel>] [<title>] [<description>]` | Create or update a panel config for your server. The category is where new tickets will be created. The log channel is where the closed ticket archives are placed.
 `/tickets delete_panel <panel_name>` | Delete a panel config and its buttons.
-`/tickets button <panel name> <position> [<label>] [<emoji>] [<style>] [<ticket title>] [<ticket message>] [<ticket color>] [<roles>]` | Create or update the button of a panel at a position. Roles are the roles that manage the tickets created by this button.
+`/tickets button <panel name> <position> [<label>] [<emoji>] [<style>] [<ticket title>] [<ticket message>] [<ticket color>] [<staff roles>] [<user roles>]` | Create or update the button of a panel at a position. Staff roles are the roles that can manage the tickets created by this button. User roles are roles allowed to interact with the button
 `/tickets delete_button <panel_name> <position>` | Delete the button config of a panel at position.
 `/tickets here <panel name> [<channel>]` | Spawn a ticket panel in this channel (or the specified one if any). Previous panel will be deleted.
 `/tickets close` | Manually close the ticket where the command is used.
