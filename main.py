@@ -10,7 +10,7 @@ from discord import app_commands
 from discord.ext import commands
 import aiosqlite
 import datetime
-from dismob import log, filehelper, colors
+from dismob import log, filehelper, colors, utils
 
 async def setup(bot: commands.Bot):
     log.info("Module `tickets` setup")
@@ -36,7 +36,7 @@ class Tickets(commands.GroupCog, name="tickets"):
         await self.setup_views()
 
     async def cog_unload(self):
-        await self.clear_views()
+        await utils.clear_views(self.bot, (TicketPanelView, TicketView))
 
     async def setup_views(self):
         """Setup persistent views for all configured panels"""
@@ -49,16 +49,6 @@ class Tickets(commands.GroupCog, name="tickets"):
                 view = TicketPanelView(self, guild_id, panel_id)
                 await view.load_buttons()
                 self.bot.add_view(view)
-
-    async def clear_views(self):
-        """Clear all persistent views from the bot"""
-        views_to_remove = []
-        for view in self.bot.persistent_views:
-            if isinstance(view, (TicketPanelView, TicketView)):
-                views_to_remove.append(view)
-                
-        for view in views_to_remove:
-            self.bot.persistent_views.remove(view)
 
     def get_ticket_id(self, ticket_channel_id: int) -> int:
         """Convert a 32-bit integer to a value between 0-1023"""
