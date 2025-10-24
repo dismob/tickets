@@ -17,6 +17,10 @@ async def setup(bot: commands.Bot):
     filehelper.ensure_directory("db")
     await bot.add_cog(Tickets(bot))
 
+async def teardown(bot: commands.Bot):
+    log.info("Module `tickets` teardown")
+    await bot.remove_cog("Tickets")
+
 class Tickets(commands.GroupCog, name="tickets"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
