@@ -466,10 +466,12 @@ class Tickets(commands.GroupCog, name="tickets"):
                         except discord.HTTPException:
                             continue
 
+        ticket_msg: str = message.replace('\\n', '\n') if message is not None else ""
+
         # Send initial messages
         embed = discord.Embed(
             title=title,
-            description=f"Ticket created by {interaction.user.mention}\n{message.replace('\\n', '\n')}",
+            description=f"Ticket created by {interaction.user.mention}\n{ticket_msg}",
             color=colors.str_to_color(color),
             timestamp=datetime.datetime.now()
         )
