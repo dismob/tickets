@@ -252,7 +252,7 @@ class Tickets(commands.GroupCog, name="tickets"):
                 return
 
             # Convert ButtonStyle enum to string
-            style_name = button_style.name.lower() if button_style else self.default_button_color
+            style_name = button_style.name.lower() if button_style else None
 
             # Update the button configuration
             await db.execute("""
