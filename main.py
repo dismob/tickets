@@ -375,10 +375,12 @@ class Tickets(commands.GroupCog, name="tickets"):
         await view.load_buttons()
 
         new_channel = channel if channel is not None else interaction.channel
-        
+        desc = panel_description or self.default_panel_description
+        desc = desc.replace('\\n', '\n')
+
         embed = discord.Embed(
             title=panel_title or self.default_panel_title,
-            description=panel_description or self.default_panel_description,
+            description=desc,
             color=discord.Color.blurple()
         )
         panel_message = await log.safe_send_message(new_channel, embed=embed, view=view)
@@ -463,7 +465,7 @@ class Tickets(commands.GroupCog, name="tickets"):
         # Send initial messages
         embed = discord.Embed(
             title=title,
-            description=f"Ticket created by {interaction.user.mention}\n{message}",
+            description=f"Ticket created by {interaction.user.mention}\n{message.replace('\\n', '\n')}",
             color=colors.str_to_color(color),
             timestamp=datetime.datetime.now()
         )
