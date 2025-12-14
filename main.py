@@ -385,6 +385,10 @@ class Tickets(commands.GroupCog, name="tickets"):
         )
         panel_message = await log.safe_send_message(new_channel, embed=embed, view=view)
 
+        if panel_message is None:
+            await log.failure(interaction, "Failed to send the ticket panel message. Please check my permissions.")
+            return
+
         # Store new panel information
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
