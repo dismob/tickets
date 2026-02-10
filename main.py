@@ -175,6 +175,91 @@ class Tickets(commands.GroupCog, name="tickets"):
             await db.commit()
         await log.success(interaction, f"Ticket panel '{panel_name}' configured successfully!")
 
+    @app_commands.command(name="list", description="List all ticket panels and buttons in the current guild")
+    @app_commands.guild_only()
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def list_panels(self, interaction: discord.Interaction):
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("""
+                SELECT id, panel_name, panel_title, panel_description, category_id, log_channel_id
+                FROM ticket_panels
+                WHERE guild_id = ?
+                ORDER BY panel_name
+            """, (interaction.guild_id,))
+            panels = await cursor.fetchall()
+
+            if not panels:
+                await log.client(interaction, "*No ticket panels configured for this guild.*", title="Ticket Panels List")
+                return
+
+            description = ""
+            for panel_id, panel_name, panel_title, panel_description, category_id, log_channel_id in panels:
+                description += f"**Panel: `{panel_name}`**\n"
+                description += f"- Title: {panel_title or 'Default'}\n"
+                description += f"- Description: {panel_description or 'Default'}\n"
+                description += f"- Category: {f'<#{category_id}>' if category_id else 'Not Set'}\n"
+                description += f"- Log Channel: {f'<#{log_channel_id}>' if log_channel_id else 'Not Set'}\n"
+
+                # Get buttons for this panel
+                cursor = await db.execute("""
+                    SELECT 
+                        id, button_position, button_label, button_emoji, button_style, 
+                        ticket_title, ticket_color,
+                        (SELECT GROUP_CONCAT(role_id) FROM ticket_button_roles WHERE button_id = ticket_buttons.id),
+                        (SELECT GROUP_CONCAT(role_id) FROM ticket_button_user_roles WHERE button_id = ticket_buttons.id)
+                    FROM ticket_buttons
+                    WHERE panel_id = ?
+                    ORDER BY button_position
+                """, (panel_id,))
+                buttons = await cursor.fetchall()
+
+                if buttons:
+                    for button_id, position, label, emoji, style, ticket_title, color, support_roles, user_roles in buttons:
+                        description += f"- **Button `{position}`:**\n"
+                        description += f"- - Label: {label}\n"
+                        description += f"- - Emoji: {emoji}\n"
+                        description += f"- - Style: {style}\n"
+                        description += f"- - Ticket Title: {ticket_title}\n"
+                        description += f"- - Ticket Color: {color}\n"
+                        support_roles_str = ", ".join([f"<@&{r}>" for r in support_roles.split(',')]) if support_roles else "None"
+                        description += f"- - Support Roles: {support_roles_str}\n"
+                        user_roles_str = ", ".join([f"<@&{r}>" for r in user_roles.split(',')]) if user_roles else "Anyone"
+                        description += f"- - User Roles: {user_roles_str}\n"
+                else:
+                    description += f"- *No buttons configured (will use default button)*\n"
+                
+                description += "\n"
+
+            # Split into multiple embeds if description is too long
+            if len(description) > 4096:
+                embeds = []
+                current_description = ""
+                for panel_section in description.split("\n\n"):
+                    if len(current_description) + len(panel_section) + 2 > 4096:
+                        embeds.append(discord.Embed(
+                            description=current_description,
+                            color=colors.str_to_color("blue")
+                        ))
+                        current_description = panel_section + "\n"
+                    else:
+                        current_description += panel_section + "\n\n"
+                
+                if current_description:
+                    embeds.append(discord.Embed(
+                        description=current_description,
+                        color=colors.str_to_color("blue")
+                    ))
+                
+                embeds[0].title = "Ticket Panels and Buttons List"
+                await interaction.response.send_message(embeds=embeds)
+            else:
+                embed = discord.Embed(
+                    title="Ticket Panels and Buttons List",
+                    description=description,
+                    color=colors.str_to_color("blue")
+                )
+                await interaction.response.send_message(embed=embed)
+
     @app_commands.command(name="delete_panel", description="Delete a ticket panel and all its buttons")
     @app_commands.guild_only()
     @app_commands.checks.has_permissions(manage_guild=True)
