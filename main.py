@@ -10,6 +10,8 @@ from discord import app_commands
 from discord.ext import commands
 import aiosqlite
 import datetime
+import json
+import io
 from dismob import log, filehelper, colors, utils
 
 async def setup(bot: commands.Bot):
@@ -278,6 +280,218 @@ class Tickets(commands.GroupCog, name="tickets"):
             await db.commit()
         
         await log.success(interaction, f"Ticket panel '{panel_name}' and all its buttons have been deleted successfully!")
+
+    @app_commands.command(name="export", description="Export all ticket configuration for this guild to a JSON file")
+    @app_commands.guild_only()
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def export_config(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # Fetch all panels for this guild
+                cursor = await db.execute("""
+                    SELECT id, panel_name, panel_title, panel_description, category_id, log_channel_id
+                    FROM ticket_panels
+                    WHERE guild_id = ?
+                """, (interaction.guild_id,))
+                panels = await cursor.fetchall()
+
+                if not panels:
+                    await log.failure(interaction, "No ticket panels configured for this guild.")
+                    return
+
+                export_data = {
+                    "guild_id": interaction.guild_id,
+                    "panels": []
+                }
+
+                # For each panel, fetch its buttons and roles
+                for panel_id, panel_name, panel_title, panel_description, category_id, log_channel_id in panels:
+                    panel_data = {
+                        "panel_name": panel_name,
+                        "panel_title": panel_title,
+                        "panel_description": panel_description,
+                        "category_id": category_id,
+                        "log_channel_id": log_channel_id,
+                        "buttons": []
+                    }
+
+                    # Fetch buttons for this panel
+                    cursor = await db.execute("""
+                        SELECT id, button_position, button_label, ticket_title, ticket_message, button_emoji, button_style, ticket_color
+                        FROM ticket_buttons
+                        WHERE panel_id = ?
+                        ORDER BY button_position
+                    """, (panel_id,))
+                    buttons = await cursor.fetchall()
+
+                    for button_id, position, label, ticket_title, ticket_message, emoji, style, color in buttons:
+                        # Fetch support roles
+                        cursor = await db.execute("SELECT role_id FROM ticket_button_roles WHERE button_id = ?", (button_id,))
+                        support_roles = [row[0] for row in await cursor.fetchall()]
+
+                        # Fetch user roles
+                        cursor = await db.execute("SELECT role_id FROM ticket_button_user_roles WHERE button_id = ?", (button_id,))
+                        user_roles = [row[0] for row in await cursor.fetchall()]
+
+                        button_data = {
+                            "position": position,
+                            "button_label": label,
+                            "ticket_title": ticket_title,
+                            "ticket_message": ticket_message,
+                            "button_emoji": emoji,
+                            "button_style": style,
+                            "ticket_color": color,
+                            "support_roles": support_roles,
+                            "user_roles": user_roles
+                        }
+                        panel_data["buttons"].append(button_data)
+
+                    export_data["panels"].append(panel_data)
+
+                # Create JSON file and send as attachment
+                json_data = json.dumps(export_data, indent=2)
+                json_file = discord.File(io.BytesIO(json_data.encode()), filename=f"tickets_config_{interaction.guild_id}.json")
+                
+                await interaction.followup.send(
+                    content=f"✅ Ticket configuration exported successfully!",
+                    file=json_file
+                )
+        except Exception as e:
+            await log.failure(interaction, f"Failed to export configuration: {str(e)}")
+
+    @app_commands.command(name="import", description="Import ticket configuration from a JSON file for this guild")
+    @app_commands.guild_only()
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def import_config(self, interaction: discord.Interaction, file: discord.Attachment):
+        await interaction.response.defer()
+        
+        try:
+            # Read the file
+            file_content = await file.read()
+            json_data = json.loads(file_content.decode())
+
+            # Validate guild ID matches
+            if json_data.get("guild_id") != interaction.guild_id:
+                await log.failure(
+                    interaction, 
+                    f"Guild ID mismatch! This configuration is for guild {json_data.get('guild_id')}, but you're trying to import it to guild {interaction.guild_id}. "
+                    f"This is a safety measure. You can edit the JSON file to match your guild ID if you want to proceed."
+                )
+                return
+
+            async with aiosqlite.connect(self.db_path) as db:
+                panels_imported = 0
+                buttons_imported = 0
+
+                # Import each panel
+                for panel_config in json_data.get("panels", []):
+                    panel_name = panel_config.get("panel_name")
+                    
+                    # Insert or update panel
+                    await db.execute("""
+                        INSERT INTO ticket_panels 
+                        (guild_id, panel_name, panel_title, panel_description, category_id, log_channel_id)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(guild_id, panel_name)
+                        DO UPDATE SET
+                            panel_title = excluded.panel_title,
+                            panel_description = excluded.panel_description,
+                            category_id = excluded.category_id,
+                            log_channel_id = excluded.log_channel_id
+                    """, (
+                        interaction.guild_id,
+                        panel_config.get("panel_name"),
+                        panel_config.get("panel_title"),
+                        panel_config.get("panel_description"),
+                        panel_config.get("category_id"),
+                        panel_config.get("log_channel_id")
+                    ))
+                    await db.commit()
+                    panels_imported += 1
+
+                    # Get the panel ID for button insertion
+                    cursor = await db.execute(
+                        "SELECT id FROM ticket_panels WHERE guild_id = ? AND panel_name = ?",
+                        (interaction.guild_id, panel_name)
+                    )
+                    panel_id_result = await cursor.fetchone()
+                    if not panel_id_result:
+                        continue
+                    panel_id = panel_id_result[0]
+
+                    # Import buttons for this panel
+                    for button_config in panel_config.get("buttons", []):
+                        position = button_config.get("position")
+
+                        # Insert or update button
+                        await db.execute("""
+                            INSERT INTO ticket_buttons 
+                            (panel_id, button_label, ticket_title, ticket_message, button_position, button_emoji, button_style, ticket_color)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            ON CONFLICT(panel_id, button_position)
+                            DO UPDATE SET
+                                button_label = excluded.button_label,
+                                ticket_title = excluded.ticket_title,
+                                ticket_message = excluded.ticket_message,
+                                button_emoji = excluded.button_emoji,
+                                button_style = excluded.button_style,
+                                ticket_color = excluded.ticket_color
+                        """, (
+                            panel_id,
+                            button_config.get("button_label"),
+                            button_config.get("ticket_title"),
+                            button_config.get("ticket_message"),
+                            position,
+                            button_config.get("button_emoji"),
+                            button_config.get("button_style"),
+                            button_config.get("ticket_color")
+                        ))
+                        await db.commit()
+                        buttons_imported += 1
+
+                        # Get button ID for role insertion
+                        cursor = await db.execute(
+                            "SELECT id FROM ticket_buttons WHERE panel_id = ? AND button_position = ?",
+                            (panel_id, position)
+                        )
+                        button_id_result = await cursor.fetchone()
+                        if not button_id_result:
+                            continue
+                        button_id = button_id_result[0]
+
+                        # Import support roles
+                        support_roles = button_config.get("support_roles", [])
+                        if support_roles:
+                            await db.execute("DELETE FROM ticket_button_roles WHERE button_id = ?", (button_id,))
+                            await db.executemany(
+                                "INSERT OR IGNORE INTO ticket_button_roles (button_id, role_id) VALUES (?, ?)",
+                                [(button_id, role_id) for role_id in support_roles]
+                            )
+                            await db.commit()
+
+                        # Import user roles
+                        user_roles = button_config.get("user_roles", [])
+                        if user_roles:
+                            await db.execute("DELETE FROM ticket_button_user_roles WHERE button_id = ?", (button_id,))
+                            await db.executemany(
+                                "INSERT OR IGNORE INTO ticket_button_user_roles (button_id, role_id) VALUES (?, ?)",
+                                [(button_id, role_id) for role_id in user_roles]
+                            )
+                            await db.commit()
+
+            await log.success(
+                interaction,
+                f"Configuration imported successfully!\n"
+                f"• **Panels imported**: {panels_imported}\n"
+                f"• **Buttons imported**: {buttons_imported}"
+            )
+            
+        except json.JSONDecodeError:
+            await log.failure(interaction, "Invalid JSON file. Please ensure the file is valid JSON.")
+        except Exception as e:
+            await log.failure(interaction, f"Failed to import configuration: {str(e)}")
 
     @app_commands.command(name="button", description="Configure a custom ticket button for a panel")
     @app_commands.guild_only()
